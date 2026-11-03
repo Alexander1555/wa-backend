@@ -1,193 +1,198 @@
-import express from 'express';
-import cors from 'cors';
-import makeWASocket, {
-  DisconnectReason,
+const express = require('express');
+const cors = require('cors');
+const qrcode = require('qrcode');
+const pino = require('pino');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const {
+  default: makeWASocket,
   useMultiFileAuthState,
-  delay
-} from '@whiskeysockets/baileys';
-import QRCode from 'qrcode';
-import pino from 'pino';
-import fs from 'fs';
-import path from 'path';
+  DisconnectReason
+} = require('@whiskeysockets/baileys');
 
 const app = express();
+
+// Konfigurasi limit payload besar agar bisa menerima lampiran gambar base64
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-const PORT = 3001;
-const sessionPath = './sessions/main_sender';
+const JWT_SECRET = 'wadojo-super-secret-key-2026';
 
-if (!fs.existsSync(sessionPath)) {
-  fs.mkdirSync(sessionPath, { recursive: true });
-}
+// Data kredensial pengguna statis
+const USERS = [
+  {
+    id: 1,
+    username: 'admin',
+    passwordHash: bcrypt.hashSync('admin123', 10),
+    role: 'superadmin',
+    quota: 999999,
+    blastCount: 0
+  },
+  {
+    id: 2,
+    username: 'member_budi',
+    passwordHash: bcrypt.hashSync('member123', 10),
+    role: 'member',
+    quota: 50,
+    blastCount: 0
+  },
+  {
+    id: 3,
+    username: 'vvip_sultan',
+    passwordHash: bcrypt.hashSync('vvip123', 10),
+    role: 'vvip',
+    quota: Infinity,
+    blastCount: 0
+  }
+];
 
+// State Baileys WhatsApp
 let sock = null;
-let currentQrBase64 = null;
+let currentQr = null;
 let connectionStatus = 'disconnected'; // 'disconnected' | 'connecting' | 'connected'
-let connectedNumber = null;
 
-// Inisialisasi koneksi WhatsApp Baileys
+// Inisialisasi Klien Baileys
 async function connectToWhatsApp() {
-  connectionStatus = 'connecting';
-  currentQrBase64 = null;
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
 
-  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+    sock = makeWASocket({
+      auth: state,
+      printQRInTerminal: false,
+      logger: pino({ level: 'silent' }),
+      browser: ['WA-Dojo Blaster', 'Chrome', '1.0.0']
+    });
 
-  sock = makeWASocket({
-    auth: state,
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,
-  });
+    sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+      if (qr) {
+        currentQr = await qrcode.toDataURL(qr);
+        connectionStatus = 'connecting';
+        console.log('[Baileys] QR code berhasil di-generate.');
+      }
 
-    // Jika ada string QR, ubah ke gambar Base64 agar bisa ditampilkan di Frontend
-    if (qr) {
-      try {
-        currentQrBase64 = await QRCode.toDataURL(qr);
+      if (connection === 'close') {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         connectionStatus = 'disconnected';
-      } catch (err) {
-        console.error('Gagal generate QR Code gambar:', err);
+        currentQr = null;
+        console.log('[Baileys] Sesi terputus. Mencoba rekoneksi:', shouldReconnect);
+
+        if (shouldReconnect) {
+          connectToWhatsApp();
+        }
+      } else if (connection === 'open') {
+        connectionStatus = 'connected';
+        currentQr = null;
+        console.log('[Baileys] Terhubung ke WhatsApp.');
       }
-    }
-
-    if (connection === 'open') {
-      connectionStatus = 'connected';
-      currentQrBase64 = null;
-      connectedNumber = sock.user?.id ? sock.user.id.split(':')[0] : 'Aktif';
-      console.log(`✅ [WhatsApp Gateway] Berhasil terhubung! Nomor: +${connectedNumber}`);
-    } else if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      connectionStatus = 'disconnected';
-      connectedNumber = null;
-
-      console.log(`⚠️ Koneksi terputus (status code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
-
-      if (shouldReconnect) {
-        connectToWhatsApp();
-      } else {
-        // Jika status logged out, bersihkan session lama
-        currentQrBase64 = null;
-        try {
-          fs.rmSync(sessionPath, { recursive: true, force: true });
-        } catch (e) {}
-      }
-    }
-  });
+    });
+  } catch (err) {
+    console.error('[Baileys Init Error]:', err);
+  }
 }
 
-// Mulai inisialisasi koneksi awal
+// Mulai Baileys saat server start
 connectToWhatsApp();
 
-// 1. Endpoint Cek Status & Ambil QR Code
-app.get('/api/wa/status', (req, res) => {
+// ==========================================
+// ENDPOINT API
+// ==========================================
+
+// 1. Endpoint Autentikasi Login
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body;
+  const user = USERS.find((u) => u.username === username);
+
+  if (!user || !bcrypt.compareSync(password, user.passwordHash)) {
+    return res.status(401).json({ success: false, message: 'Username atau password salah' });
+  }
+
+  const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, {
+    expiresIn: '7d'
+  });
+
+  return res.json({
+    success: true,
+    token,
+    user: {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      quota: user.quota,
+      blastCount: user.blastCount
+    }
+  });
+});
+
+// 2. Endpoint Mengambil Status Sesi WhatsApp & QR Code
+app.get('/api/qr', (req, res) => {
   res.json({
     status: connectionStatus,
-    qrImage: currentQrBase64,
-    phoneNumber: connectedNumber,
+    qr: currentQr
   });
 });
 
-// 2. Endpoint Trigger Generate / Reset QR
-app.post('/api/wa/restart', async (req, res) => {
-  try {
-    if (sock) {
-      sock.end();
-    }
-    // Hapus sesi lama agar menghasilkan QR baru
-    try {
-      fs.rmSync(sessionPath, { recursive: true, force: true });
-    } catch (e) {}
-
-    await connectToWhatsApp();
-    res.json({ message: 'Gateway di-reset. Menghasilkan QR baru...' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 3. Endpoint Putuskan Sesi (Logout)
-app.post('/api/wa/logout', async (req, res) => {
-  try {
-    if (sock) {
-      await sock.logout();
-    }
-    try {
-      fs.rmSync(sessionPath, { recursive: true, force: true });
-    } catch (e) {}
-    connectionStatus = 'disconnected';
-    connectedNumber = null;
-    currentQrBase64 = null;
-    res.json({ message: 'Berhasil logout dari WhatsApp.' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 4. Endpoint Eksekusi Blast Pesan
-app.post('/api/blast/start', async (req, res) => {
-  const { recipients, message, mediaUrl, links, minDelay = 5, maxDelay = 10 } = req.body;
+// 3. Endpoint Kirim Pesan Realtime
+app.post('/api/send', async (req, res) => {
+  const { phone, message, imageBase64, buttons } = req.body;
 
   if (connectionStatus !== 'connected' || !sock) {
-    return res.status(503).json({ error: 'Nomor WhatsApp belum terhubung! Silakan scan QR terlebih dahulu di menu Setting.' });
+    return res.status(503).json({
+      success: false,
+      message: 'Koneksi WhatsApp belum terhubung. Silakan scan QR code terlebih dahulu.'
+    });
   }
 
-  if (!recipients || !recipients.length || !message) {
-    return res.status(400).json({ error: 'Nomor tujuan dan isi pesan wajib diisi!' });
+  if (!phone) {
+    return res.status(400).json({ success: false, message: 'Nomor tujuan wajib diisi.' });
   }
 
-  res.json({
-    status: 'started',
-    totalRecipients: recipients.length,
-    message: 'Proses blast pengiriman pesan telah dimulai di latar belakang.'
-  });
-
-  // Background Worker
-  (async () => {
-    for (let i = 0; i < recipients.length; i++) {
-      let phone = recipients[i].replace(/[^0-9]/g, '');
-      if (phone.startsWith('0')) phone = '62' + phone.slice(1);
-      const jid = `${phone}@s.whatsapp.net`;
-
-      try {
-        let parsedMessage = message.replace(/\{\{nomor\}\}/gi, phone);
-        if (links && Array.isArray(links)) {
-          links.forEach((lnk, idx) => {
-            const tag = new RegExp(`\\{\\{link${idx + 1}\\}\\}`, 'gi');
-            parsedMessage = lnk.enabled ? parsedMessage.replace(tag, lnk.url) : parsedMessage.replace(tag, '');
-          });
-        }
-
-        // Simulasi Mengetik
-        await sock.sendPresenceUpdate('composing', jid);
-        await delay(2000);
-
-        if (mediaUrl) {
-          await sock.sendMessage(jid, {
-            image: { url: mediaUrl },
-            caption: parsedMessage.trim()
-          });
-        } else {
-          await sock.sendMessage(jid, { text: parsedMessage.trim() });
-        }
-
-        await sock.sendPresenceUpdate('paused', jid);
-        console.log(`[Blast Sukses] Terkirim ke +${phone}`);
-      } catch (err) {
-        console.error(`[Blast Gagal] Gagal kirim ke +${phone}:`, err.message);
-      }
-
-      // Delay acak
-      const waitTime = Math.floor(Math.random() * (maxDelay - minDelay + 1) + minDelay) * 1000;
-      await delay(waitTime);
+  try {
+    // Normalisasi format nomor WhatsApp
+    let cleanPhone = phone.replace(/[^0-9]/g, '');
+    if (cleanPhone.startsWith('0')) {
+      cleanPhone = '62' + cleanPhone.slice(1);
     }
-  })();
+    const jid = `${cleanPhone}@s.whatsapp.net`;
+
+    // Susun pesan teks dan tambahkan teks link button jika ada
+    let finalMessage = message || '';
+    if (buttons && Array.isArray(buttons) && buttons.length > 0) {
+      const buttonLinks = buttons
+        .filter((b) => b.text && b.url)
+        .map((b) => `👉 ${b.text}: ${b.url}`)
+        .join('\n');
+
+      if (buttonLinks) {
+        finalMessage += `\n\n${buttonLinks}`;
+      }
+    }
+
+    // Jika mengirim gambar beserta caption
+    if (imageBase64) {
+      const buffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+      await sock.sendMessage(jid, {
+        image: buffer,
+        caption: finalMessage
+      });
+    } else {
+      // Kirim teks saja
+      await sock.sendMessage(jid, { text: finalMessage });
+    }
+
+    return res.json({ success: true, message: 'Pesan berhasil terkirim' });
+  } catch (error) {
+    console.error('[Send Message Error]:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
 });
 
+const PORT = 3001;
 app.listen(PORT, () => {
-  console.log(`🚀 WA Blast Backend aktif di http://localhost:${PORT}`);
+  console.log(`Server WA-Dojo Blaster Backend berjalan di port ${PORT}`);
 });
