@@ -59,21 +59,25 @@ async function connectToWhatsApp() {
   try {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
     const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`[Baileys] Menggunakan WA Web v${version.join('.')}, isLatest: ${isLatest}`);
+    console.log(`[Baileys] WA Web v${version.join('.')}, isLatest: ${isLatest}`);
 
     sock = makeWASocket({
       version,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      // Gunakan profil Windows Desktop agar menyerupai browser biasa
-      browser: Browsers.windows('Desktop'),
+      // Gunakan kombinasi browser terstabil untuk Baileys di VPS Linux
+      browser: Browsers.macOS('Desktop'),
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
-      keepAliveIntervalMs: 15000,
-      retryRequestDelayMs: 3000,
-      generateHighQualityLinkPreview: false,
-      syncFullHistory: false
+      keepAliveIntervalMs: 25000,
+      emitOwnEvents: false,
+      markOnlineOnConnect: true,
+      syncFullHistory: false,
+      // Wajib untuk mencegah error 401 saat handshake enkripsi pesan pertama
+      getMessage: async (key) => {
+        return { conversation: '' };
+      }
     });
 
     sock.ev.on('creds.update', saveCreds);
