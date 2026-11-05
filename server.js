@@ -14,14 +14,12 @@ const {
 
 const app = express();
 
-// Konfigurasi limit payload besar untuk upload gambar base64
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 const JWT_SECRET = 'wadojo-super-secret-key-2026';
 
-// Data kredensial pengguna statis
 const USERS = [
   {
     id: 1,
@@ -49,21 +47,17 @@ const USERS = [
   }
 ];
 
-// State Baileys WhatsApp
 let sock = null;
 let currentQr = null;
-let connectionStatus = 'disconnected'; // 'disconnected' | 'connecting' | 'connected'
+let connectionStatus = 'disconnected';
 let isConnecting = false;
 
-// Inisialisasi Klien Baileys WhatsApp
 async function connectToWhatsApp() {
   if (isConnecting) return;
   isConnecting = true;
 
   try {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
-    
-    // Ambil versi WhatsApp Web resmi terbaru secara otomatis
     const { version, isLatest } = await fetchLatestBaileysVersion();
     console.log(`[Baileys] Menggunakan WA Web v${version.join('.')}, isLatest: ${isLatest}`);
 
@@ -72,13 +66,14 @@ async function connectToWhatsApp() {
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      browser: Browsers.ubuntu('Chrome'), // Menggunakan browser fingerprint resmi Baileys
+      // Gunakan profil Windows Desktop agar menyerupai browser biasa
+      browser: Browsers.windows('Desktop'),
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 15000,
       retryRequestDelayMs: 3000,
       generateHighQualityLinkPreview: false,
-      syncFullHistory: false // Mencegah sinkronisasi chat lama agar sesi awal tidak drop (anti 401)
+      syncFullHistory: false
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -98,10 +93,9 @@ async function connectToWhatsApp() {
         connectionStatus = 'disconnected';
         currentQr = null;
         isConnecting = false;
-        console.log(`[Baileys] Koneksi terputus (status code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
+        console.log(`[Baileys] Sesi terputus (code: ${statusCode}). Reconnect: ${shouldReconnect}`);
 
         if (shouldReconnect) {
-          // Jeda 5 detik sebelum mencoba menyambung ulang
           setTimeout(() => {
             connectToWhatsApp();
           }, 5000);
@@ -122,14 +116,9 @@ async function connectToWhatsApp() {
   }
 }
 
-// Jalankan socket saat server menyala
 connectToWhatsApp();
 
-// ==========================================
-// ENDPOINT API
-// ==========================================
-
-// 1. Endpoint Autentikasi Pengguna
+// API Login
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
   const user = USERS.find((u) => u.username === username);
@@ -157,7 +146,7 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// 2. Endpoint Mengambil Status Sesi & Gambar QR Code
+// API QR
 app.get('/api/qr', (req, res) => {
   res.json({
     status: connectionStatus,
@@ -165,14 +154,14 @@ app.get('/api/qr', (req, res) => {
   });
 });
 
-// 3. Endpoint Kirim Pesan Realtime
+// API Send Pesan
 app.post('/api/send', async (req, res) => {
   const { phone, message, imageBase64, buttons } = req.body;
 
   if (connectionStatus !== 'connected' || !sock) {
     return res.status(503).json({
       success: false,
-      message: 'WhatsApp belum terhubung. Silakan lakukan scan QR code terlebih dahulu.'
+      message: 'WhatsApp belum terhubung. Harap scan QR code terlebih dahulu.'
     });
   }
 
@@ -181,23 +170,12 @@ app.post('/api/send', async (req, res) => {
   }
 
   try {
-    // Normalisasi format nomor tujuan WhatsApp
     let cleanPhone = phone.replace(/[^0-9]/g, '');
     if (cleanPhone.startsWith('0')) {
       cleanPhone = '62' + cleanPhone.slice(1);
     }
     const jid = `${cleanPhone}@s.whatsapp.net`;
 
-    // Validasi apakah nomor tujuan aktif terdaftar di WhatsApp
-    const checkUser = await sock.onWhatsApp(jid);
-    if (!checkUser || !checkUser[0] || !checkUser[0].exists) {
-      return res.status(400).json({ 
-        success: false, 
-        message: `Nomor ${cleanPhone} tidak terdaftar di WhatsApp.` 
-      });
-    }
-
-    // Susun pesan teks dan tambahkan action link button jika ada
     let finalMessage = message || '';
     if (buttons && Array.isArray(buttons) && buttons.length > 0) {
       const buttonLinks = buttons
@@ -210,7 +188,6 @@ app.post('/api/send', async (req, res) => {
       }
     }
 
-    // Kirim gambar dan caption jika terdapat lampiran gambar
     if (imageBase64) {
       const buffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
       await sock.sendMessage(jid, {
@@ -218,7 +195,6 @@ app.post('/api/send', async (req, res) => {
         caption: finalMessage
       });
     } else {
-      // Kirim pesan teks reguler
       await sock.sendMessage(jid, { text: finalMessage });
     }
 
