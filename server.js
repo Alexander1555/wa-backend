@@ -9,7 +9,8 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  Browsers
+  Browsers,
+  delay
 } = require('@whiskeysockets/baileys');
 
 const app = express();
@@ -59,27 +60,27 @@ async function connectToWhatsApp() {
   try {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
     const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`[Baileys] WA Web v${version.join('.')}, isLatest: ${isLatest}`);
+    console.log(`[Baileys] Menggunakan WA Web v${version.join('.')}, isLatest: ${isLatest}`);
 
     sock = makeWASocket({
       version,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      // Gunakan kombinasi browser terstabil untuk Baileys di VPS Linux
-      browser: Browsers.macOS('Desktop'),
+      // Format browser bawaan yang paling konsisten diterima server WA
+      browser: ['WA-Dojo Blaster', 'Chrome', '124.0.6367.207'],
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
-      keepAliveIntervalMs: 25000,
-      emitOwnEvents: false,
-      markOnlineOnConnect: true,
+      keepAliveIntervalMs: 30000,
+      retryRequestDelayMs: 2000,
+      generateHighQualityLinkPreview: false,
       syncFullHistory: false,
-      // Wajib untuk mencegah error 401 saat handshake enkripsi pesan pertama
-      getMessage: async (key) => {
-        return { conversation: '' };
-      }
+      markOnlineOnConnect: false,
+      // Mencegah kegagalan desinkronisasi Signal Protocol
+      getMessage: async () => ({ conversation: '' })
     });
 
+    // Wajib: Simpan kredensial secara persisten
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async (update) => {
@@ -191,6 +192,9 @@ app.post('/api/send', async (req, res) => {
         finalMessage += `\n\n${buttonLinks}`;
       }
     }
+
+    // Beri jeda mikro sebelum melempar socket write agar buffer stabil
+    await delay(500);
 
     if (imageBase64) {
       const buffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
