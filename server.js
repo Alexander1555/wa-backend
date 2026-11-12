@@ -9,7 +9,6 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  Browsers,
   delay
 } = require('@whiskeysockets/baileys');
 
@@ -67,7 +66,6 @@ async function connectToWhatsApp() {
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      // Format browser bawaan yang paling konsisten diterima server WA
       browser: ['WA-Dojo Blaster', 'Chrome', '124.0.6367.207'],
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
@@ -76,11 +74,9 @@ async function connectToWhatsApp() {
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
       markOnlineOnConnect: false,
-      // Mencegah kegagalan desinkronisasi Signal Protocol
       getMessage: async () => ({ conversation: '' })
     });
 
-    // Wajib: Simpan kredensial secara persisten
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async (update) => {
@@ -123,7 +119,7 @@ async function connectToWhatsApp() {
 
 connectToWhatsApp();
 
-// API Login
+// Endpoint Autentikasi Pengguna
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
   const user = USERS.find((u) => u.username === username);
@@ -151,7 +147,7 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// API QR
+// Endpoint Ambil QR & Status Koneksi
 app.get('/api/qr', (req, res) => {
   res.json({
     status: connectionStatus,
@@ -159,7 +155,7 @@ app.get('/api/qr', (req, res) => {
   });
 });
 
-// API Send Pesan
+// Endpoint Kirim Pesan dengan Simulasi Presence (Typing)
 app.post('/api/send', async (req, res) => {
   const { phone, message, imageBase64, buttons } = req.body;
 
@@ -193,8 +189,12 @@ app.post('/api/send', async (req, res) => {
       }
     }
 
-    // Beri jeda mikro sebelum melempar socket write agar buffer stabil
+    // Simulasi membuka ruang obrolan dan mengetik untuk menstabilkan enkripsi Signal
+    await sock.presenceSubscribe(jid);
     await delay(500);
+    await sock.sendPresenceUpdate('composing', jid);
+    await delay(2000);
+    await sock.sendPresenceUpdate('paused', jid);
 
     if (imageBase64) {
       const buffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
