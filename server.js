@@ -54,6 +54,7 @@ let currentQr = null;
 let connectionStatus = 'disconnected';
 let isConnecting = false;
 let reconnectAttempts = 0;
+let reconnectTimer = null;
 let restriction = null; // { type, until, reason }
 
 // Antrean blast di backend
@@ -87,9 +88,21 @@ function normalizePhone(phone) {
   return clean;
 }
 
+function scheduleReconnect(delayMs) {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectToWhatsApp();
+  }, delayMs);
+}
+
 async function connectToWhatsApp() {
   if (isConnecting) return;
   isConnecting = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
 
   try {
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
@@ -103,7 +116,7 @@ async function connectToWhatsApp() {
       logger: pino({ level: 'silent' }),
       // Fingerprint konsisten dengan WA Web asli
       browser: Browsers.ubuntu('Chrome'),
-      connectTimeoutMs: 60000,
+      connectTimeoutMs: 30000,
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 30000,
       retryRequestDelayMs: 2000,
@@ -128,6 +141,7 @@ async function connectToWhatsApp() {
       if (qr) {
         currentQr = await qrcode.toDataURL(qr);
         connectionStatus = 'connecting';
+        isConnecting = false;
         console.log('[Baileys] QR code baru di-generate.');
       }
 
@@ -143,12 +157,13 @@ async function connectToWhatsApp() {
         if (loggedOut) {
           reconnectAttempts = 0;
           console.log('[Baileys] Logged out — perlu scan QR ulang.');
+          scheduleReconnect(1000);
         } else {
-          // Backoff eksponensial: 5s, 15s, 60s, 300s (maks)
-          const backoff = [5000, 15000, 60000, 300000][Math.min(reconnectAttempts, 3)];
+          // Backoff cepat: 1s, 2s, 3s, 5s (maks) — QR segera muncul lagi
+          const backoff = [1000, 2000, 3000, 5000][Math.min(reconnectAttempts, 3)];
           reconnectAttempts++;
           console.log(`[Baileys] Reconnect dalam ${backoff / 1000}s (percobaan ${reconnectAttempts}).`);
-          setTimeout(() => connectToWhatsApp(), backoff);
+          scheduleReconnect(backoff);
         }
       } else if (connection === 'open') {
         connectionStatus = 'connected';
@@ -183,9 +198,9 @@ async function connectToWhatsApp() {
   } catch (err) {
     console.error('[Baileys Init Error]:', err);
     isConnecting = false;
-    const backoff = [5000, 15000, 60000, 300000][Math.min(reconnectAttempts, 3)];
+    const backoff = [1000, 2000, 3000, 5000][Math.min(reconnectAttempts, 3)];
     reconnectAttempts++;
-    setTimeout(() => connectToWhatsApp(), backoff);
+    scheduleReconnect(backoff);
   }
 }
 
@@ -221,6 +236,10 @@ app.post('/api/login', (req, res) => {
 
 // Endpoint Ambil QR & Status Koneksi
 app.get('/api/qr', (req, res) => {
+  // Pastikan koneksi selalu berjalan agar QR selalu tersedia
+  if (!isConnecting && !reconnectTimer && connectionStatus !== 'connected') {
+    connectToWhatsApp();
+  }
   res.json({
     status: connectionStatus,
     qr: currentQr,
