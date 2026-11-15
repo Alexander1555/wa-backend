@@ -307,11 +307,13 @@ async function sendOne(phone, message, imageBase64, buttons) {
   // Jeda natural singkat (bukan presence simulation)
   await delay(1000 + Math.floor(Math.random() * 2000));
 
+  // ponytail: linkPreview null -> skip Baileys getUrlInfo (link-preview-js tidak terinstall, bikin 500).
+  // Kalau butuh kartu preview, install `npm i link-preview-js@^3` lalu hapus properti ini.
   if (imageBase64) {
     const buffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-    await sock.sendMessage(jid, { image: buffer, caption: finalMessage });
+    await sock.sendMessage(jid, { image: buffer, caption: finalMessage, linkPreview: null });
   } else {
-    await sock.sendMessage(jid, { text: finalMessage });
+    await sock.sendMessage(jid, { text: finalMessage, linkPreview: null });
   }
 
   return { success: true, message: 'Pesan berhasil terkirim' };
